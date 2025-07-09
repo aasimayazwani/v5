@@ -8,7 +8,7 @@ import streamlit as st
 from jinja2 import Template
 
 from langchain_community.utilities.sql_database import SQLDatabase
-from langchain.chains import SQLDatabaseSequentialChain
+from langchain.chains.sql_database.base import SQLDatabaseChain
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph
 
@@ -17,8 +17,14 @@ DB_PATH = "vehicles.db"
 db = SQLDatabase.from_uri(f"sqlite:///{DB_PATH}")
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-sql_chain = SQLDatabaseSequentialChain.from_llm(
-    llm, db, verbose=False, return_intermediate_steps=False, top_k=5
+
+
+sql_chain = SQLDatabaseChain.from_llm(
+    llm,
+    db,
+    return_direct=True,
+    verbose=False,
+    top_k=5
 )
 
 # ------------------------- Prompt Loading Logic ------------------------
