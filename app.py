@@ -36,14 +36,13 @@ def render_modular_prompt(folder: str, **kwargs) -> str:
     return Template(raw_prompt).render(**kwargs)
 
 # ─────────────────────────── LangGraph state ──────────────────────────
-class SQLAgentState(TypedDict):
+class SQLAgentState(TypedDict, total=False):
     user_query: str
-    selected_tables: Optional[List[str]]
-    generated_sql: Optional[str]
-    sql_result: Optional[List[dict]]
-    final_answer: Optional[str]
-    error: Optional[str]
-
+    selected_tables: List[str]
+    generated_sql: str
+    sql_result: List[dict]
+    final_answer: str
+    error: str
 # ───────────────────────────── Agent nodes ────────────────────────────
 def supervisor_agent(state: SQLAgentState) -> str:
     if state.get("error"):
