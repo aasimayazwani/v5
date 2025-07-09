@@ -1,0 +1,17 @@
+# EMBEDDED BUSINESS RULES – vehicles.db
+
+🔋 Electric Vehicle Filtering
+- A vehicle is EV if bus_vid.model='EV' OR vid IN (SELECT id FROM electric_vehicle_ids)
+
+🚨 SOC Alert Thresholds
+pred_end_soc <0.10 → Critical
+pred_end_soc <0.40 → Low
+≥0.40              → Normal
+…
+
+🚌 Service Validation Rule
+CURRENT_TIMESTAMP BETWEEN INSERVICE_START_TIME±15 min ➜ in service
+…
+
+📉 Historical vs. Predicted SOC Accuracy
+ABS(actual - predicted) etc.

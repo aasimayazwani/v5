@@ -1,0 +1,9 @@
+# Value Recency Policy
+Current/Latest → ORDER BY timestamp DESC LIMIT 1
+…
+
+# Query Generation Guidelines
+- Unless user asks for one row, do not LIMIT 1
+- Fetch wide scope by default
+- Only add ORDER BY when user asks “latest”, “oldest”, etc.
+…

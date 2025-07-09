@@ -1,0 +1,7 @@
+# Join Keys & Relationships
+
+vid = getvehicles.vid = bus_vid.name = clever_pred.bus_id
+tablockid = gtfs_block.BLOCK_ID_USER = clever_pred.block_id
+blk = gtfs_block.BLOCK_ID_GTFS = trip_event_bustime.blk
+tatripid = trip_event_bustime.tatripid = getvehicles.tatripid
+…

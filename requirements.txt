@@ -1,0 +1,18 @@
+# ───────── Core LLM / LangChain stack ─────────
+openai>=1.15.0
+langchain>=0.10.0
+langchain-core>=0.10.0
+langchain-community>=0.10.0
+langchain-openai>=0.1.0
+langgraph>=0.5.2          # NEW – multi-agent coordinator
+
+# ─────────  Streamlit UI ─────────
+streamlit>=1.35.0         # NEW – web front-end
+
+# ─────────  Database / ORM  ─────────
+sqlalchemy>=2.0.30
+psycopg2-binary>=2.9.9     # only if you talk to Postgres
+pandas>=2.2.0              # optional but handy for tabular formatting
+
+# ─────────  Cloud helpers (if used) ─────────
+boto3>=1.34.0

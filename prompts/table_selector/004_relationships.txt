@@ -1,0 +1,13 @@
+{
+  "getvehicles": {
+    "description": "Real-time vehicle positions/status (5-min window)",
+    "keys": ["vid", "timestamp", "tablockid", "blk", "tatripid"],
+    "relationships": {
+      "trip_event_bustime": ["vid", "tablockid", "blk", "tatripid"],
+      "clever_pred": ["vid", "timestamp"],
+      "gtfs_block": ["tablockid → BLOCK_ID_USER", "blk → BLOCK_ID_GTFS"],
+      "bus_vid": ["vid → name"]
+    }
+  },
+  …
+}

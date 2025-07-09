@@ -1,0 +1,6 @@
+# Table Selection Guidelines
+Context Analysis → decide data domain
+Table Lookup → shortlist candidate tables
+Table Matching → pick best alignment
+Error Handling → ask clarifying question
+Fallback Logic → list options if uncertain

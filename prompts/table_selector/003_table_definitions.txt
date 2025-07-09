@@ -1,0 +1,7 @@
+# Table Definitions (High Level)
+getvehicles – Live AVL (vid, timestamp, tablockid…)
+clever_pred – Real-time SOC predictions
+trip_event_bustime – Historical trip metrics
+gtfs_block – Static block schedules
+bus_vid – Bus metadata & EV tags
+… (abbreviated column descriptions)

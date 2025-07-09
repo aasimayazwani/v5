@@ -1,0 +1,2 @@
+A bus block is “in service” if CURRENT_TIMESTAMP is within ±15 min of INSERVICE_START_TIME in gtfs_block.
+If not in service, return: “Bus <id> is currently out of service.”
