@@ -8,7 +8,7 @@ import streamlit as st
 from jinja2 import Template
 
 from langchain_community.utilities.sql_database import SQLDatabase
-from langchain.chains.sql_database.base import SQLDatabaseChain
+from langchain.chains.sql_database import SQLDatabaseChain
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph
 
