@@ -1,44 +1,41 @@
 # app.py — Modular Supervisor SQL Agent (LangGraph + Streamlit + LangChain)
 
 import os
-from typing import TypedDict, Optional, List
 from pathlib import Path
+from typing import TypedDict, Optional, List
+
 import pandas as pd
 import streamlit as st
 from jinja2 import Template
 
 from langchain_community.utilities.sql_database import SQLDatabase
-from langchain.chains.sql_database import SQLDatabaseChain
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph
 
-# --------------------------- Configuration ----------------------------
+# ─────────────────────────── Configuration ────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise EnvironmentError("Missing OPENAI_API_KEY in environment variables.")
+
 DB_PATH = "vehicles.db"
 db = SQLDatabase.from_uri(f"sqlite:///{DB_PATH}")
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
 
-
-sql_chain = SQLDatabaseChain.from_llm(
-    llm,
-    db,
-    return_direct=True,
-    verbose=False,
-    top_k=5
-)
-
-# ------------------------- Prompt Loading Logic ------------------------
-def load_modular_system_prompt(folder="modular_prompt") -> str:
+# ───────────────────── Prompt-loading helpers ─────────────────────────
+def load_modular_system_prompt(folder: str) -> str:
     folder_path = Path(folder)
     if not folder_path.exists():
         raise FileNotFoundError(f"Prompt folder not found: {folder_path.resolve()}")
-    return "\n\n".join(p.read_text("utf-8").strip() for p in sorted(folder_path.glob("*.*")))
+    return "\n\n".join(
+        p.read_text("utf-8").strip() for p in sorted(folder_path.glob("*.*"))
+    )
 
 def render_modular_prompt(folder: str, **kwargs) -> str:
     raw_prompt = load_modular_system_prompt(folder)
     return Template(raw_prompt).render(**kwargs)
 
-# ------------------------- LangGraph State -----------------------------
+# ─────────────────────────── LangGraph state ──────────────────────────
 class SQLAgentState(TypedDict):
     user_query: str
     selected_tables: Optional[List[str]]
@@ -47,7 +44,7 @@ class SQLAgentState(TypedDict):
     final_answer: Optional[str]
     error: Optional[str]
 
-# --------------------------- Agent Nodes ------------------------------
+# ───────────────────────────── Agent nodes ────────────────────────────
 def supervisor_agent(state: SQLAgentState) -> str:
     if state.get("error"):
         return "end"
@@ -78,8 +75,8 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             user_query=state["user_query"],
             table_list=", ".join(state["selected_tables"]),
         )
-        sql_text = sql_chain.run(prompt)
-        return {**state, "generated_sql": sql_text.strip()}
+        sql_text: str = llm.invoke(prompt).strip()
+        return {**state, "generated_sql": sql_text}
     except Exception as e:
         return {**state, "error": str(e)}
 
@@ -96,12 +93,12 @@ def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
 def formatting_agent(state: SQLAgentState) -> SQLAgentState:
     df = state["sql_result"]
     if df.empty:
-        answer_md = "\ud83d\udeab **No data returned for this query.**"
+        answer_md = "🚫 **No data returned for this query.**"
     else:
         answer_md = df.to_markdown(index=False)
     return {**state, "final_answer": answer_md}
 
-# ------------------------ LangGraph Assembly ---------------------------
+# ───────────────────────── LangGraph assembly ─────────────────────────
 def build_graph():
     builder = StateGraph(SQLAgentState)
     builder.add_node("supervisor", supervisor_agent)
@@ -119,12 +116,17 @@ def build_graph():
     builder.set_finish_point("supervisor")
     return builder.compile()
 
-# -------------------------- Streamlit UI -------------------------------
 graph = build_graph()
-st.set_page_config(page_title="Supervisor SQL Agent", layout="wide")
-st.title("\ud83d\udea6 Supervisor SQL Agent (LangGraph + Streamlit)")
 
-q = st.text_input("Ask a database question:", placeholder="e.g. What is the SOC of all EVs in service?")
+# ─────────────────────────── Streamlit UI ─────────────────────────────
+st.set_page_config(page_title="Supervisor SQL Agent", layout="wide")
+st.title("🚦 Supervisor SQL Agent (LangGraph + Streamlit)")
+
+q = st.text_input(
+    "Ask a database question:",
+    placeholder="e.g. What is the SOC of all EVs in service?",
+)
+
 if st.button("Run") and q:
     with st.spinner("Thinking…"):
         init_state: SQLAgentState = {
