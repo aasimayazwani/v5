@@ -40,7 +40,7 @@ class SQLAgentState(TypedDict):
     user_query: str
     selected_tables: Optional[List[str]]
     generated_sql: Optional[str]
-    sql_result: Optional[pd.DataFrame]
+    sql_result: Optional[List[dict]]
     final_answer: Optional[str]
     error: Optional[str]
 
@@ -95,16 +95,18 @@ def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
         return {**state, "error": "Refused non-SELECT statement."}
     try:
         df = db.run(sql, fetch="pandas")
-        return {**state, "sql_result": df}
+        records = df.to_dict(orient="records")  # ✅ convert to JSON-safe list of dicts
+        return {**state, "sql_result": records}
     except Exception as e:
         return {**state, "error": str(e)}
 
 def formatting_agent(state: SQLAgentState) -> SQLAgentState:
-    df = state["sql_result"]
-    if df.empty:
-        answer_md = "🚫 **No data returned for this query.**"
-    else:
-        answer_md = df.to_markdown(index=False)
+    records = state["sql_result"]
+    if not records:
+        return {**state, "final_answer": "🚫 **No data returned for this query.**"}
+
+    df = pd.DataFrame(records)
+    answer_md = df.to_markdown(index=False)
     return {**state, "final_answer": answer_md}
 
 # ───────────────────────── LangGraph assembly ─────────────────────────
