@@ -91,12 +91,19 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
 
 def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
     sql = state["generated_sql"]
-    if "select" not in sql.lower():
+    if not sql or "select" not in sql.lower():
         return {**state, "error": "Refused non-SELECT statement."}
     try:
         df = db.run(sql, fetch="pandas")
-        records = df.to_dict(orient="records")  # ✅ convert to JSON-safe list of dicts
-        return {**state, "sql_result": records}
+        records = df.to_dict(orient="records")  # ✅ safe
+        return {
+            "user_query": state["user_query"],
+            "selected_tables": state["selected_tables"],
+            "generated_sql": state["generated_sql"],
+            "sql_result": records,  # ✅ not a DataFrame!
+            "final_answer": None,
+            "error": None,
+        }
     except Exception as e:
         return {**state, "error": str(e)}
 
