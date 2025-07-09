@@ -75,10 +75,13 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             user_query=state["user_query"],
             table_list=", ".join(state["selected_tables"]),
         )
-        sql_text: str = llm.invoke(prompt).strip()
+        response = llm.invoke(prompt)
+        sql_text = response.content.strip()  # 👈 Extract raw string
+
         return {**state, "generated_sql": sql_text}
     except Exception as e:
         return {**state, "error": str(e)}
+
 
 def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
     sql = state["generated_sql"]
