@@ -1,4 +1,4 @@
-"""app.py — Robust LangGraph SQL Chatbot (v3)
+"""app.py — Robust LangGraph SQL Chatbot (v3)
 ────────────────────────────────────────────────────────
 • Opens DB in **read‑only mode** (`?mode=ro`) to bypass WAL issues
 • Auto‑deletes stray WAL/SHM files (optional) before connecting
@@ -91,7 +91,7 @@ except Exception as e:
         sys.exit(1)
 
 # ─── LLM & Toolkit ────────────────────────────────────────────────
-llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=OPENAI_API_KEY)
+llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.7, api_key=OPENAI_API_KEY)
 
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 all_tools = toolkit.get_tools()
@@ -130,27 +130,42 @@ def planner_node(state: AgentState) -> str:
 # ─── SQL Agent Node ----------------------------------------------
 sql_exec: AgentExecutor = create_sql_agent(llm=llm, toolkit=toolkit, verbose=False)
 
+def fallback_handler(state):
+    return {"sql_result": "Error: query execution failed."}
+
 sql_node = RunnableWithFallbacks(
     runnable=sql_exec,
-    fallbacks=[RunnableLambda(lambda _: ToolMessage(tool_call_id="sql_query_tool", content="Error: query execution failed."))],
+    fallbacks=[RunnableLambda(fallback_handler)],
 )
 
 def run_sql_agent(state: AgentState) -> AgentState:
-    res = sql_node.invoke({"input": state["query"]})
-    return {**state, "sql_result": str(res)}
+    try:
+        res = sql_node.invoke({"input": state["query"]})
+        # Extract the actual result from the agent response
+        if hasattr(res, 'get') and 'output' in res:
+            result = res['output']
+        else:
+            result = str(res)
+        return {**state, "sql_result": result}
+    except Exception as e:
+        return {**state, "sql_result": f"Error: {str(e)}"}
 
 # ─── Schema Agent Node -------------------------------------------
 
 def run_schema_agent(state: AgentState) -> AgentState:
-    q_lower = state["query"].lower()
-    if re.search(r"\blist\b|\bshow\b.*\btables?\b", q_lower):
-        res = list_tables_tool.invoke({})
-    else:
-        tbl = extract_table(state["query"])
-        if not tbl:
-            return {**state, "schema_help": "❌ No valid table name found."}
-        res = schema_tool.invoke({"table_names": [tbl]})
-    return {**state, "schema_help": str(res)}
+    try:
+        q_lower = state["query"].lower()
+        if re.search(r"\blist\b|\bshow\b.*\btables?\b", q_lower):
+            res = list_tables_tool.invoke("")  # Empty string input
+        else:
+            tbl = extract_table(state["query"])
+            if not tbl:
+                return {**state, "schema_help": "❌ No valid table name found."}
+            # Pass the table name as a string, not a dictionary
+            res = schema_tool.invoke(tbl)
+        return {**state, "schema_help": str(res)}
+    except Exception as e:
+        return {**state, "schema_help": f"Error getting schema: {str(e)}"}
 
 # ─── Summariser Node ---------------------------------------------
 
@@ -180,21 +195,28 @@ graph.add_edge("summariser", END)
 app = graph.compile()
 
 # ─── Streamlit UI -------------------------------------------------
-st.set_page_config(page_title="🧠 LangGraph SQL Chatbot", layout="centered")
-st.title("🧠 LangGraph SQL Chatbot")
+if st.runtime.exists():
+    st.set_page_config(page_title="🧠 LangGraph SQL Chatbot", layout="centered")
+    st.title("🧠 LangGraph SQL Chatbot")
 
-prompt = st.text_input("Ask a database question:", placeholder="e.g. describe routes")
-if st.button("Run") and prompt:
-    with st.spinner("Thinking…"):
-        out_state = app.invoke({"query": prompt})
-    st.success("Done!")
-    st.subheader("Answer")
-    st.markdown(out_state["final_response"])
-    with st.expander("🔍 Debug trace"):
-        st.json(out_state)
+    prompt = st.text_input("Ask a database question:", placeholder="e.g. describe routes")
+    if st.button("Run") and prompt:
+        with st.spinner("Thinking…"):
+            try:
+                out_state = app.invoke({"query": prompt})
+                st.success("Done!")
+                st.subheader("Answer")
+                st.markdown(out_state["final_response"])
+                with st.expander("🔍 Debug trace"):
+                    st.json(out_state)
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
 
 # ─── CLI fallback -------------------------------------------------
 if __name__ == "__main__" and not st.runtime.exists():
     q = " ".join(sys.argv[1:]) or "list tables"
-    res = app.invoke({"query": q})
-    print("\nAnswer:\n", res["final_response"])
+    try:
+        res = app.invoke({"query": q})
+        print("\nAnswer:\n", res["final_response"])
+    except Exception as e:
+        print(f"Error: {str(e)}")
