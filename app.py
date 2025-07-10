@@ -1,183 +1,160 @@
-# app.py — Modular Supervisor SQL Agent (LangGraph + Streamlit + LangChain)
+# app.py — Resilient LangGraph SQL Agent w/ Tool Fallbacks and Modular Tooling
 
-import json
 import os
-import re
-from pathlib import Path
-from typing import List, TypedDict
-
+import json
 import pandas as pd
+from pathlib import Path
+from typing import Annotated, TypedDict, List, Optional
 import streamlit as st
 from jinja2 import Template
+
 from langchain_community.utilities.sql_database import SQLDatabase
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain_core.messages import ToolMessage
+from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langchain_core.prompts import ChatPromptTemplate
 
-# ─────────────────────── Configuration ───────────────────────
+# -------------------- Config ----------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise EnvironmentError("Missing OPENAI_API_KEY environment variable.")
+    raise EnvironmentError("Missing OPENAI_API_KEY env var")
 
-DB_PATH = "vehicles.db"  # ensure this file exists
+DB_PATH = "vehicles.db"
 db = SQLDatabase.from_uri(f"sqlite:///{DB_PATH}")
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
+llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=OPENAI_API_KEY)
 
-
-# ─────────────────── Prompt-loading helpers ───────────────────
+# -------------------- Prompt Utils ----------------------
 def load_modular_system_prompt(folder: str) -> str:
-    fp = Path(folder)
-    if not fp.exists():
-        raise FileNotFoundError(fp.resolve())
-    return "\n\n".join(p.read_text("utf-8").strip() for p in sorted(fp.glob("*.*")))
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        raise FileNotFoundError(f"Prompt folder not found: {folder_path.resolve()}")
+    return "\n\n".join(p.read_text("utf-8").strip() for p in sorted(folder_path.glob("*.*")))
 
-def render_modular_prompt(folder: str, **kw) -> str:
-    return Template(load_modular_system_prompt(folder)).render(**kw)
+def render_modular_prompt(folder: str, **kwargs) -> str:
+    raw_prompt = load_modular_system_prompt(folder)
+    return Template(raw_prompt).render(**kwargs)
 
-# ─────────────────────── LangGraph state ──────────────────────
-class SQLAgentState(TypedDict, total=False):
-    user_query: str
-    selected_tables: List[str]
-    generated_sql: str
-    sql_result: List[dict]
-    final_answer: str
-    error: str
+# -------------------- Tools ----------------------
+toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+tools = toolkit.get_tools()
 
-# ───────────────────────── Agent nodes ────────────────────────
-def supervisor_agent(_: SQLAgentState) -> SQLAgentState:
-    """Pass-through; routing handled by add_conditional_edges."""
-    return {}
+list_tables_tool = next(t for t in tools if t.name == "sql_db_list_tables")
+get_schema_tool = next(t for t in tools if t.name == "sql_db_schema")
 
-def table_selection_agent(state: SQLAgentState) -> SQLAgentState:
-    q = state["user_query"].lower()
-    tables = db.get_table_info()
-    matches = [t for t in tables if any(word in t.lower() for word in q.split())] or [
-        t.split(":")[0] for t in tables
-    ]
-    return {"selected_tables": matches}
+@tool
+def db_query_tool(query: str) -> str:
+    result = db.run_no_throw(query)
+    if not result:
+        return "Error: Query failed. Please rewrite your query and try again."
+    return str(result)
 
-import re
+# ------------------ Query Checker ------------------
+query_check_system = """You are a SQL expert with a strong attention to detail.
+Double check the SQLite query for common mistakes, including:
+- Using NOT IN with NULL values
+- Using UNION when UNION ALL should have been used
+- Using BETWEEN for exclusive ranges
+- Data type mismatch in predicates
+- Properly quoting identifiers
+- Using the correct number of arguments for functions
+- Casting to the correct data type
+- Using the proper columns for joins
+If there are any of the above mistakes, rewrite the query. If not, return the original.
+"""
 
-def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
-    try:
-        # Render the structured prompt
-        prompt = render_modular_prompt(
-            "prompts/sql_generator",
-            user_query=state["user_query"],
-            table_list=", ".join(state["selected_tables"]),
-        )
+query_check_prompt = ChatPromptTemplate.from_messages(
+    [("system", query_check_system), ("placeholder", "{messages}")]
+)
+query_check = query_check_prompt | ChatOpenAI(model="gpt-4", temperature=0).bind_tools(
+    [db_query_tool], tool_choice="required"
+)
 
-        # Get response from LLM
-        response = llm.invoke(prompt)
-        raw_output = response.content.strip()
+# -------------------- Error Handling Wrapper ----------------------
+def handle_tool_error(state) -> dict:
+    error = state.get("error")
+    tool_calls = state["messages"][-1].tool_calls
+    return {
+        "messages": [
+            ToolMessage(
+                content=f"Error: {repr(error)}\nPlease fix your mistakes.",
+                tool_call_id=tc["id"],
+            )
+            for tc in tool_calls
+        ]
+    }
 
-        # 🔐 Safeguard against verbose natural language answers
-        if not re.search(r"\bselect\b", raw_output, re.IGNORECASE):
-            return {"error": "LLM did not generate a SQL SELECT query."}
+def create_tool_node_with_fallback(tools: list) -> RunnableWithFallbacks:
+    return ToolNode(tools).with_fallbacks([
+        RunnableLambda(handle_tool_error)
+    ], exception_key="error")
 
-        # 🔍 Extract first valid SELECT query
-        match = re.search(r"(?is)\bselect\b[\s\S]+?;", raw_output)
-        if not match:
-            return {"error": "No valid SQL SELECT statement found in LLM output."}
+# -------------------- LangGraph State ----------------------
+class SQLAgentState(TypedDict):
+    messages: Annotated[list, lambda m: m]  # Used to thread through all tool messages
 
-        sql_text = match.group(0).strip()
-
-        return {
-            "user_query": state["user_query"],
-            "selected_tables": state["selected_tables"],
-            "generated_sql": sql_text,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
-    sql = state.get("generated_sql")
-    if not sql or "select" not in sql.lower():
-        return {"error": "Invalid or missing SQL. Only SELECT statements allowed."}
-    try:
-        df = db.run(sql, fetch="pandas")
-        records = json.loads(json.dumps(df.to_dict("records"), default=str))
-        return {"sql_result": records}
-    except Exception as e:
-        return {"error": str(e)}
-
-def formatting_agent(state: SQLAgentState) -> SQLAgentState:
-    if not state.get("sql_result"):
-        return {
-            "final_answer": "🤖 Sorry, I couldn't generate a valid SQL query for your request. Try asking a question like:\n\n- What is the current SOC for bus 2401?\n- Show all buses in service.\n- Latest predicted SOC for EVs."
-        }
-
-    df = pd.DataFrame(state["sql_result"])
-    if df.empty:
-        return {"final_answer": "🚫 **No data returned for this query.**"}
-    return {"final_answer": df.to_markdown(index=False)}
-
-
-# ───────────────────── Graph assembly ────────────────────────
+# -------------------- Graph Construction ----------------------
 def build_graph():
-    g = StateGraph(SQLAgentState)
+    builder = StateGraph(SQLAgentState)
 
-    # nodes
-    g.add_node("supervisor", supervisor_agent)
-    g.add_node("table_selection", table_selection_agent)
-    g.add_node("sql_generation", sql_generation_agent)
-    g.add_node("sql_execution", sql_execution_agent)
-    g.add_node("formatting", formatting_agent)
+    builder.add_node("list_tables", create_tool_node_with_fallback([list_tables_tool]))
+    builder.add_node("get_schema", create_tool_node_with_fallback([get_schema_tool]))
+    builder.add_node("query_check", lambda s: {"messages": [query_check.invoke({"messages": s["messages"]})]})
+    builder.add_node("execute_query", create_tool_node_with_fallback([db_query_tool]))
 
-    # return-to-supervisor edges
-    g.add_edge("table_selection", "supervisor")
-    g.add_edge("sql_generation", "supervisor")
-    g.add_edge("sql_execution", "supervisor")
-    g.add_edge("formatting", "supervisor")
+    def start_tool_call(state: SQLAgentState):
+        return {
+            "messages": [
+                {
+                    "tool_calls": [
+                        {"name": "sql_db_list_tables", "args": {}, "id": "call1"}
+                    ],
+                    "content": "",
+                }
+            ]
+        }
 
-    # routing logic
-    def _route(state: SQLAgentState) -> str:
-        if state.get("error"):
-            return "end"
-        if "selected_tables" not in state:
-            return "table_selection"
-        if "generated_sql" not in state:
-            return "sql_generation"
-        if "sql_result" not in state:
-            return "sql_execution"
-        if "final_answer" not in state:
-            return "formatting"
-        return "end"
+    def should_continue(state: SQLAgentState):
+        last_msg = state["messages"][-1]
+        if hasattr(last_msg, "tool_calls"):
+            return END
+        if "Error:" in str(last_msg):
+            return "list_tables"
+        return "query_check"
 
-    g.add_conditional_edges(
-        "supervisor",
-        _route,
-        {
-            "table_selection": "table_selection",
-            "sql_generation": "sql_generation",
-            "sql_execution": "sql_execution",
-            "formatting": "formatting",
-            "end": END,
-        },
-    )
+    builder.add_node("start", start_tool_call)
+    builder.set_entry_point("start")
+    builder.add_edge("start", "list_tables")
+    builder.add_edge("list_tables", "get_schema")
+    builder.add_edge("get_schema", "query_check")
+    builder.add_edge("query_check", "execute_query")
+    builder.add_edge("execute_query", "get_schema")  # Loop for retries
+    builder.set_finish_point("execute_query")
 
-    g.set_entry_point("supervisor")
-    g.set_finish_point("supervisor")   # reached only if _route returns "end"
-    return g.compile()
+    return builder.compile()
 
 graph = build_graph()
 
-# ─────────────────────── Streamlit UI ────────────────────────
+# -------------------- Streamlit UI ----------------------
 st.set_page_config(page_title="Supervisor SQL Agent", layout="wide")
 st.title("🚦 Supervisor SQL Agent (LangGraph + Streamlit)")
 
-question = st.text_input("Ask a database question:",
-                          placeholder="e.g. What is the SOC of all EVs in service?")
+query = st.text_input("Ask a database question:", placeholder="e.g. What is the SOC of all EVs?")
 
-if st.button("Run") and question:
-    with st.spinner("Thinking…"):
-        init_state: SQLAgentState = {"user_query": question}
+if st.button("Run") and query:
+    with st.spinner("Running agent..."):
+        init_state = {"messages": [
+            {"content": query}
+        ]}
         final_state = graph.invoke(init_state)
+        st.subheader("🔍 Debug")
+        st.json(final_state)
 
-    # 🟢 ADD THIS DEBUG BLOCK HERE
-    st.subheader("🔍 Debug")
-    st.json(final_state)
-
-    if final_state.get("error"):
-        st.error(final_state["error"])
-    else:
-        st.markdown(final_state["final_answer"])
+        last = final_state["messages"][-1]
+        if hasattr(last, "content"):
+            st.markdown(last.content)
+        else:
+            st.info("No final response.")
