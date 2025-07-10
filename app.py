@@ -65,14 +65,33 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
     except Exception as e:
         return {"error": str(e)}
 
-def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
-    sql = state.get("generated_sql")
-    if not sql or "select" not in sql.lower():
-        return {"error": "Invalid or missing SQL. Only SELECT statements allowed."}
+import re
+
+def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
     try:
-        df = db.run(sql, fetch="pandas")
-        records = json.loads(json.dumps(df.to_dict("records"), default=str))
-        return {"sql_result": records}
+        prompt = render_modular_prompt(
+            "prompts/sql_generator",
+            user_query=state["user_query"],
+            table_list=", ".join(state["selected_tables"]),
+        )
+        response = llm.invoke(prompt)
+        raw = response.content.strip()
+
+        # ✅ Extract the first SQL SELECT query from the model output
+        match = re.search(r"(?is)\bselect\b[\s\S]+?;", raw)
+        if not match:
+            return {"error": "No valid SQL SELECT statement found in LLM output."}
+
+        sql_text = match.group(0).strip()
+
+        return {
+            "user_query": state["user_query"],
+            "selected_tables": state["selected_tables"],
+            "generated_sql": sql_text,
+            "sql_result": None,
+            "final_answer": None,
+            "error": None,
+        }
     except Exception as e:
         return {"error": str(e)}
 
