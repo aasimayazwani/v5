@@ -1,6 +1,5 @@
-
-# app.py — Modular Supervisor SQL Agent (LangGraph + Streamlit + LangChain)
-
+import json                    # <-- ADD THIS
+import pandas as pd
 import os
 from pathlib import Path
 from typing import TypedDict, Optional, List
@@ -84,14 +83,16 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
 
 def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
     sql = state.get("generated_sql")
-
-    if not sql or not isinstance(sql, str) or "select" not in sql.lower():
+    if not sql or "select" not in sql.lower():
         return {"error": "Invalid or missing SQL. Only SELECT statements are allowed."}
 
     try:
         df = db.run(sql, fetch="pandas")
-        records = df.to_dict(orient="records")
-        return {"sql_result": records}
+        # 🔽 NEW ─ convert every value to a pure-Python JSON value
+        records = json.loads(
+            json.dumps(df.to_dict(orient="records"), default=str)
+        )
+        return {"sql_result": records}          # ✅ always JSON-safe
     except Exception as e:
         return {"error": str(e)}
 
