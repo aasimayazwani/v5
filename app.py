@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, TypedDict
 
@@ -17,9 +18,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise EnvironmentError("Missing OPENAI_API_KEY environment variable.")
 
-DB_PATH = "vehicles.db"                       # ensure this file exists
+DB_PATH = "vehicles.db"  # ensure this file exists
 db = SQLDatabase.from_uri(f"sqlite:///{DB_PATH}")
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
+
 
 # ─────────────────── Prompt-loading helpers ───────────────────
 def load_modular_system_prompt(folder: str) -> str:
@@ -60,20 +62,6 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             user_query=state["user_query"],
             table_list=", ".join(state["selected_tables"]),
         )
-        sql_text = llm.invoke(prompt).content.strip()
-        return {"generated_sql": sql_text}
-    except Exception as e:
-        return {"error": str(e)}
-
-import re
-
-def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
-    try:
-        prompt = render_modular_prompt(
-            "prompts/sql_generator",
-            user_query=state["user_query"],
-            table_list=", ".join(state["selected_tables"]),
-        )
         response = llm.invoke(prompt)
         raw = response.content.strip()
 
@@ -92,6 +80,17 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             "final_answer": None,
             "error": None,
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
+    sql = state.get("generated_sql")
+    if not sql or "select" not in sql.lower():
+        return {"error": "Invalid or missing SQL. Only SELECT statements allowed."}
+    try:
+        df = db.run(sql, fetch="pandas")
+        records = json.loads(json.dumps(df.to_dict("records"), default=str))
+        return {"sql_result": records}
     except Exception as e:
         return {"error": str(e)}
 
