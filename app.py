@@ -55,18 +55,27 @@ def table_selection_agent(state: SQLAgentState) -> SQLAgentState:
     ]
     return {"selected_tables": matches}
 
+import re
+
 def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
     try:
+        # Render the structured prompt
         prompt = render_modular_prompt(
             "prompts/sql_generator",
             user_query=state["user_query"],
             table_list=", ".join(state["selected_tables"]),
         )
-        response = llm.invoke(prompt)
-        raw = response.content.strip()
 
-        # ✅ Extract the first SQL SELECT query from the model output
-        match = re.search(r"(?is)\bselect\b[\s\S]+?;", raw)
+        # Get response from LLM
+        response = llm.invoke(prompt)
+        raw_output = response.content.strip()
+
+        # 🔐 Safeguard against verbose natural language answers
+        if not re.search(r"\bselect\b", raw_output, re.IGNORECASE):
+            return {"error": "LLM did not generate a SQL SELECT query."}
+
+        # 🔍 Extract first valid SELECT query
+        match = re.search(r"(?is)\bselect\b[\s\S]+?;", raw_output)
         if not match:
             return {"error": "No valid SQL SELECT statement found in LLM output."}
 
@@ -76,9 +85,6 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             "user_query": state["user_query"],
             "selected_tables": state["selected_tables"],
             "generated_sql": sql_text,
-            "sql_result": None,
-            "final_answer": None,
-            "error": None,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -95,11 +101,16 @@ def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
         return {"error": str(e)}
 
 def formatting_agent(state: SQLAgentState) -> SQLAgentState:
-    records = state.get("sql_result", [])
-    if not records:
+    if not state.get("sql_result"):
+        return {
+            "final_answer": "🤖 Sorry, I couldn't generate a valid SQL query for your request. Try asking a question like:\n\n- What is the current SOC for bus 2401?\n- Show all buses in service.\n- Latest predicted SOC for EVs."
+        }
+
+    df = pd.DataFrame(state["sql_result"])
+    if df.empty:
         return {"final_answer": "🚫 **No data returned for this query.**"}
-    md = pd.DataFrame(records).to_markdown(index=False)
-    return {"final_answer": md}
+    return {"final_answer": df.to_markdown(index=False)}
+
 
 # ───────────────────── Graph assembly ────────────────────────
 def build_graph():
@@ -161,6 +172,10 @@ if st.button("Run") and question:
     with st.spinner("Thinking…"):
         init_state: SQLAgentState = {"user_query": question}
         final_state = graph.invoke(init_state)
+
+    # 🟢 ADD THIS DEBUG BLOCK HERE
+    st.subheader("🔍 Debug")
+    st.json(final_state)
 
     if final_state.get("error"):
         st.error(final_state["error"])
