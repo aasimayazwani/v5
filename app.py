@@ -45,7 +45,6 @@ tools = toolkit.get_tools()
 list_tables_tool = next(t for t in tools if t.name == "sql_db_list_tables")
 get_schema_tool = next(t for t in tools if t.name == "sql_db_schema")
 
-@tool
 def db_query_tool(query: str) -> str:
     result = db.run_no_throw(query)
     if not result:
