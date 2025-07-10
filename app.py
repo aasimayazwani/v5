@@ -83,15 +83,17 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
         return {**state, "error": str(e)}
 
 def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
-    sql = state.get("generated_sql", "")
-    if "select" not in sql.lower():
-        return {**state, "error": "Refused non-SELECT statement."}
+    sql = state.get("generated_sql")
+
+    if not sql or not isinstance(sql, str) or "select" not in sql.lower():
+        return {"error": "Invalid or missing SQL. Only SELECT statements are allowed."}
+
     try:
         df = db.run(sql, fetch="pandas")
         records = df.to_dict(orient="records")
-        return {**state, "sql_result": records}
+        return {"sql_result": records}
     except Exception as e:
-        return {**state, "error": str(e)}
+        return {"error": str(e)}
 
 def formatting_agent(state: SQLAgentState) -> SQLAgentState:
     records = state.get("sql_result", [])
