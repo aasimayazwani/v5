@@ -1,3 +1,4 @@
+
 # app.py — Modular Supervisor SQL Agent (LangGraph + Streamlit + LangChain)
 
 import os
@@ -43,17 +44,18 @@ class SQLAgentState(TypedDict, total=False):
     sql_result: List[dict]
     final_answer: str
     error: str
+
 # ───────────────────────────── Agent nodes ────────────────────────────
 def supervisor_agent(state: SQLAgentState) -> str:
     if state.get("error"):
         return "end"
-    if not state.get("selected_tables"):
+    if "selected_tables" not in state:
         return "table_selection"
-    if not state.get("generated_sql"):
+    if "generated_sql" not in state:
         return "sql_generation"
-    if state.get("sql_result") is None:
+    if "sql_result" not in state:
         return "sql_execution"
-    if not state.get("final_answer"):
+    if "final_answer" not in state:
         return "formatting"
     return "end"
 
@@ -75,39 +77,24 @@ def sql_generation_agent(state: SQLAgentState) -> SQLAgentState:
             table_list=", ".join(state["selected_tables"]),
         )
         response = llm.invoke(prompt)
-        sql_text = response.content.strip()  # extract string, not full object
-
-        return {
-            "user_query": state["user_query"],
-            "selected_tables": state["selected_tables"],
-            "generated_sql": sql_text,
-            "sql_result": None,
-            "final_answer": None,
-            "error": None,
-        }
+        sql_text = response.content.strip()
+        return {**state, "generated_sql": sql_text}
     except Exception as e:
         return {**state, "error": str(e)}
 
 def sql_execution_agent(state: SQLAgentState) -> SQLAgentState:
-    sql = state["generated_sql"]
-    if not sql or "select" not in sql.lower():
+    sql = state.get("generated_sql", "")
+    if "select" not in sql.lower():
         return {**state, "error": "Refused non-SELECT statement."}
     try:
         df = db.run(sql, fetch="pandas")
-        records = df.to_dict(orient="records")  # ✅ safe
-        return {
-            "user_query": state["user_query"],
-            "selected_tables": state["selected_tables"],
-            "generated_sql": state["generated_sql"],
-            "sql_result": records,  # ✅ not a DataFrame!
-            "final_answer": None,
-            "error": None,
-        }
+        records = df.to_dict(orient="records")
+        return {**state, "sql_result": records}
     except Exception as e:
         return {**state, "error": str(e)}
 
 def formatting_agent(state: SQLAgentState) -> SQLAgentState:
-    records = state["sql_result"]
+    records = state.get("sql_result", [])
     if not records:
         return {**state, "final_answer": "🚫 **No data returned for this query.**"}
 
@@ -147,12 +134,7 @@ q = st.text_input(
 if st.button("Run") and q:
     with st.spinner("Thinking…"):
         init_state: SQLAgentState = {
-            "user_query": q,
-            "selected_tables": None,
-            "generated_sql": None,
-            "sql_result": None,
-            "final_answer": None,
-            "error": None,
+            "user_query": q
         }
         final_state = graph.invoke(init_state)
 
