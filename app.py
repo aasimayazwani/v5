@@ -1,6 +1,7 @@
-"""app.py — Robust LangGraph SQL Chatbot
+"""app.py — Robust LangGraph SQL Chatbot (v2)
 -------------------------------------------------------------
-• Handles missing/locked database files gracefully
+• Auto‑detect correct toolkit tools by *name* (no brittle indexes)
+• Handles missing/locked DB files gracefully
 • Smarter routing & automatic schema fallback
 • Streamlit UI + CLI fallback
 -------------------------------------------------------------
@@ -36,15 +37,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise EnvironmentError("Missing OPENAI_API_KEY env var")
 
-# Absolute path ensures the driver can find the file regardless of CWD
 DB_URI = f"sqlite:///{Path(DB_PATH).expanduser().resolve()}"
 
-# Instantiate database (with graceful failure handling)
+# Attempt to initialise DB -------------------------------------------------
 try:
     db = SQLDatabase.from_uri(DB_URI)
     VALID_TABLES: List[str] = [tbl.lower() for tbl in db.get_usable_table_names()]
 except Exception as e:
-    # Surface a clear error in Streamlit, or STDERR when running via CLI
     msg = f"❌ Could not open SQLite DB at {DB_URI}\n{e}"
     if st.runtime.exists():
         st.error(msg)
@@ -53,79 +52,79 @@ except Exception as e:
         print(msg, file=sys.stderr)
         sys.exit(1)
 
-# LLM + toolkits -----------------------------------------------------
+# ─── LLM & Toolkit ---------------------------------------------------------
 llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=OPENAI_API_KEY)
 
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-# tools[0] = sql_db_list_tables, tools[1] = sql_db_schema
-tools = toolkit.get_tools()
+all_tools = toolkit.get_tools()
 
-# Custom raw‑query tool (docstring mandatory!) -----------------------
+# Grab the exact tools by name (order‑agnostic) -----------------------------
+list_tables_tool = next(t for t in all_tools if t.name == "sql_db_list_tables")
+schema_tool = next(t for t in all_tools if t.name == "sql_db_schema")
+
+# (Optional) raw query tool in case you want it later -----------------------
 @tool
 def db_query_tool(query: str) -> str:
     """Run a raw SQL query against the SQLite database and return its results."""
     result = db.run_no_throw(query)
     return str(result) if result else "Error: Query failed."
 
-# Agent‑graph state --------------------------------------------------
+# ─── Agent State -----------------------------------------------------------
 class AgentState(TypedDict):
     query: str
     sql_result: Optional[str]
     schema_help: Optional[str]
     final_response: Optional[str]
 
-# Helper -------------------------------------------------------------
-regex_word = re.compile(r"\b\w+\b")
+# ─── Helpers ---------------------------------------------------------------
+_word_re = re.compile(r"\b\w+\b")
 
 def extract_table(text: str) -> Optional[str]:
-    """Return the last token that matches a real table name."""
-    for w in reversed(regex_word.findall(text.lower())):
+    """Return the last token that matches an existing table name."""
+    for w in reversed(_word_re.findall(text.lower())):
         if w in VALID_TABLES:
             return w
     return None
 
-# Planner node -------------------------------------------------------
+# ─── Planner Node ----------------------------------------------------------
 
 def planner_node(state: AgentState) -> str:
     q = state["query"].lower()
-    # Keywords that imply schema help vs. SQL generation
-    schema_triggers = ("table", "column", "schema", "structure",
-                       "describe", "list", "database")
+    schema_triggers = ("table", "column", "schema", "structure", "describe", "list", "database")
     return "schema_agent" if any(tok in q for tok in schema_triggers) else "sql_agent"
 
-# SQL agent node with fallback --------------------------------------
-sql_exec: AgentExecutor = create_sql_agent(llm=llm, toolkit=toolkit, verbose=False)
+# ─── SQL Agent Node --------------------------------------------------------
+sql_executor: AgentExecutor = create_sql_agent(llm=llm, toolkit=toolkit, verbose=False)
 
 sql_node = RunnableWithFallbacks(
-    runnable=sql_exec,
-    fallbacks=[RunnableLambda(lambda _: ToolMessage(
-        tool_call_id="sql_query_tool", content="Error: query execution failed."))],
+    runnable=sql_executor,
+    fallbacks=[RunnableLambda(lambda _: ToolMessage(tool_call_id="sql_query_tool", content="Error: query execution failed."))],
 )
 
 def run_sql_agent(state: AgentState) -> AgentState:
-    res = sql_node.invoke({"input": state["query"]})
-    return {**state, "sql_result": str(res)}
+    result = sql_node.invoke({"input": state["query"]})
+    return {**state, "sql_result": str(result)}
 
-# Schema agent node --------------------------------------------------
+# ─── Schema Agent Node -----------------------------------------------------
 
 def run_schema_agent(state: AgentState) -> AgentState:
     q_lower = state["query"].lower()
     if re.search(r"\blist\b|\bshow\b.*\btables?\b", q_lower):
-        res = tools[0].invoke({})  # sql_db_list_tables
+        res = list_tables_tool.invoke({})
     else:
         tbl = extract_table(state["query"])
         if not tbl:
             return {**state, "schema_help": "❌ No valid table name found."}
-        res = tools[1].invoke({"table_names": [tbl]})  # sql_db_schema
+        res = schema_tool.invoke({"table_names": [tbl]})
     return {**state, "schema_help": str(res)}
 
-# Summariser node ----------------------------------------------------
+# ─── Summariser Node -------------------------------------------------------
 
 def summariser_node(state: AgentState) -> AgentState:
     answer = state.get("sql_result") or state.get("schema_help") or "No output generated."
     return {**state, "final_response": answer}
 
-# ─── LangGraph build ────────────────────────────────────────────────
+# ─── LangGraph Build -------------------------------------------------------
 graph = StateGraph(AgentState)
 
 graph.add_node("planner", RunnableLambda(lambda s: s))
@@ -133,38 +132,34 @@ graph.add_node("sql_agent", run_sql_agent)
 graph.add_node("schema_agent", run_schema_agent)
 graph.add_node("summariser", summariser_node)
 
-# Entry & routing ----------------------------------------------------
+# Entry & edges
 graph.set_entry_point("planner")
 graph.add_conditional_edges("planner", planner_node)
-
-# Dynamic fallback: if SQL fails, reroute to schema_agent
 
 def route_after_sql(state: AgentState) -> str:
     return "schema_agent" if str(state.get("sql_result", "")).startswith("Error") else "summariser"
 
 graph.add_conditional_edges("sql_agent", route_after_sql)
-
-# Normal edges
 graph.add_edge("schema_agent", "summariser")
 graph.add_edge("summariser", END)
 
 app = graph.compile()
 
-# ─── Streamlit UI ---------------------------------------------------
+# ─── Streamlit UI ----------------------------------------------------------
 st.set_page_config(page_title="🧠 LangGraph SQL Chatbot", layout="centered")
 st.title("🧠 LangGraph SQL Chatbot")
 
-prompt = st.text_input("Ask a database question:", placeholder="e.g. describe routes")
-if st.button("Run") and prompt:
+user_prompt = st.text_input("Ask a database question:", placeholder="e.g. describe routes")
+if st.button("Run") and user_prompt:
     with st.spinner("Thinking…"):
-        out_state = app.invoke({"query": prompt})
+        state_out = app.invoke({"query": user_prompt})
     st.success("Done!")
     st.subheader("Answer")
-    st.markdown(out_state["final_response"])
+    st.markdown(state_out["final_response"])
     with st.expander("🔍 Debug trace"):
-        st.json(out_state)
+        st.json(state_out)
 
-# ─── CLI fallback ---------------------------------------------------
+# ─── CLI fallback ----------------------------------------------------------
 if __name__ == "__main__" and not st.runtime.exists():
     q = " ".join(sys.argv[1:]) or "list tables"
     res = app.invoke({"query": q})
