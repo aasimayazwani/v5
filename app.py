@@ -1,159 +1,90 @@
-# app.py — Resilient LangGraph SQL Agent w/ Tool Fallbacks and Modular Tooling
+# app.py — Multi-Agent LangGraph SQL Chatbot
 
 import os
-import json
-import pandas as pd
-from pathlib import Path
-from typing import Annotated, TypedDict, List, Optional
-import streamlit as st
-from jinja2 import Template
-
-from langchain_community.utilities.sql_database import SQLDatabase
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from typing import TypedDict, Optional
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
+from langchain_openai import ChatOpenAI
+from langchain_community.utilities.sql_database import SQLDatabase
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain.agents import AgentExecutor, create_sql_agent
 from langchain_core.prompts import ChatPromptTemplate
 
-# -------------------- Config ----------------------
+# ------------------ Config ---------------------
+DB_PATH = "vehicles.db"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise EnvironmentError("Missing OPENAI_API_KEY env var")
 
-DB_PATH = "vehicles.db"
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
 db = SQLDatabase.from_uri(f"sqlite:///{DB_PATH}")
-llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=OPENAI_API_KEY)
-
-# -------------------- Prompt Utils ----------------------
-def load_modular_system_prompt(folder: str) -> str:
-    folder_path = Path(folder)
-    if not folder_path.exists():
-        raise FileNotFoundError(f"Prompt folder not found: {folder_path.resolve()}")
-    return "\n\n".join(p.read_text("utf-8").strip() for p in sorted(folder_path.glob("*.*")))
-
-def render_modular_prompt(folder: str, **kwargs) -> str:
-    raw_prompt = load_modular_system_prompt(folder)
-    return Template(raw_prompt).render(**kwargs)
-
-# -------------------- Tools ----------------------
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 tools = toolkit.get_tools()
 
-list_tables_tool = next(t for t in tools if t.name == "sql_db_list_tables")
-get_schema_tool = next(t for t in tools if t.name == "sql_db_schema")
+# ------------------ Agent State ---------------------
+class AgentState(TypedDict):
+    query: str
+    sql_result: Optional[str]
+    schema_help: Optional[str]
+    final_response: Optional[str]
 
-@tool
-def db_query_tool(query: str) -> str:
-    result = db.run_no_throw(query)
-    if not result:
-        return "Error: Query failed. Please rewrite your query and try again."
-    return str(result)
-# ------------------ Query Checker ------------------
-query_check_system = """You are a SQL expert with a strong attention to detail.
-Double check the SQLite query for common mistakes, including:
-- Using NOT IN with NULL values
-- Using UNION when UNION ALL should have been used
-- Using BETWEEN for exclusive ranges
-- Data type mismatch in predicates
-- Properly quoting identifiers
-- Using the correct number of arguments for functions
-- Casting to the correct data type
-- Using the proper columns for joins
-If there are any of the above mistakes, rewrite the query. If not, return the original.
-"""
+# ------------------ Nodes ---------------------
 
-query_check_prompt = ChatPromptTemplate.from_messages(
-    [("system", query_check_system), ("placeholder", "{messages}")]
-)
-query_check = query_check_prompt | ChatOpenAI(model="gpt-4", temperature=0).bind_tools(
-    [db_query_tool], tool_choice="required"
+# Planner Node
+def planner_node(state: AgentState) -> str:
+    q = state["query"].lower()
+    if any(word in q for word in ["table", "column", "schema", "structure"]):
+        return "schema_agent"
+    return "sql_agent"
+
+# SQL Agent Node
+sql_agent_executor = create_sql_agent(llm=llm, toolkit=toolkit, verbose=True)
+sql_agent_node = RunnableWithFallbacks(
+    runnable=sql_agent_executor,
+    fallbacks=[RunnableLambda(lambda s: ToolMessage(tool_call_id="sql_query_tool", tool_output="Query failed."))]
 )
 
-# -------------------- Error Handling Wrapper ----------------------
-def handle_tool_error(state) -> dict:
-    error = state.get("error")
-    tool_calls = state["messages"][-1].tool_calls
-    return {
-        "messages": [
-            ToolMessage(
-                content=f"Error: {repr(error)}\nPlease fix your mistakes.",
-                tool_call_id=tc["id"],
-            )
-            for tc in tool_calls
-        ]
-    }
+def run_sql_agent(state: AgentState) -> AgentState:
+    output = sql_agent_node.invoke({"input": state["query"]})
+    return {**state, "sql_result": str(output)}
 
-def create_tool_node_with_fallback(tools: list) -> RunnableWithFallbacks:
-    return ToolNode(tools).with_fallbacks([
-        RunnableLambda(handle_tool_error)
-    ], exception_key="error")
+# Schema Agent Node (uses list/describe table tools)
+def run_schema_agent(state: AgentState) -> AgentState:
+    if "list" in state["query"]:
+        result = tools[0].invoke({})
+    else:
+        table_name = state["query"].split(" ")[-1]
+        result = tools[1].invoke({"table_name": table_name})
+    return {**state, "schema_help": str(result)}
 
-# -------------------- LangGraph State ----------------------
-class SQLAgentState(TypedDict):
-    messages: list  # Used to thread through all tool messages
+# Final Answer Generator
+def summarizer_node(state: AgentState) -> AgentState:
+    summary = state.get("sql_result") or state.get("schema_help") or "No output generated."
+    return {**state, "final_response": summary}
 
-# -------------------- Graph Construction ----------------------
-def build_graph():
-    builder = StateGraph(SQLAgentState)
+# ------------------ LangGraph ---------------------
 
-    builder.add_node("list_tables", create_tool_node_with_fallback([list_tables_tool]))
-    builder.add_node("get_schema", create_tool_node_with_fallback([get_schema_tool]))
-    builder.add_node("query_check", lambda s: {"messages": [query_check.invoke({"messages": s["messages"]})]})
-    builder.add_node("execute_query", create_tool_node_with_fallback([db_query_tool]))
+graph = StateGraph(AgentState)
 
-    def start_tool_call(state: SQLAgentState):
-        return {
-            "messages": [
-                {
-                    "tool_calls": [
-                        {"name": "sql_db_list_tables", "args": {}, "id": "call1"}
-                    ],
-                    "content": "",
-                }
-            ]
-        }
+graph.add_node("planner", RunnableLambda(lambda s: s))  # just routes
+graph.add_node("sql_agent", run_sql_agent)
+graph.add_node("schema_agent", run_schema_agent)
+graph.add_node("summarizer", summarizer_node)
 
-    def should_continue(state: SQLAgentState):
-        last_msg = state["messages"][-1]
-        if hasattr(last_msg, "tool_calls"):
-            return END
-        if "Error:" in str(last_msg):
-            return "list_tables"
-        return "query_check"
+# Entry point
+graph.set_entry_point("planner")
+graph.add_conditional_edges("planner", planner_node)
+graph.add_edge("sql_agent", "summarizer")
+graph.add_edge("schema_agent", "summarizer")
+graph.add_edge("summarizer", END)
 
-    builder.add_node("start", start_tool_call)
-    builder.set_entry_point("start")
-    builder.add_edge("start", "list_tables")
-    builder.add_edge("list_tables", "get_schema")
-    builder.add_edge("get_schema", "query_check")
-    builder.add_edge("query_check", "execute_query")
-    builder.add_edge("execute_query", "get_schema")  # Loop for retries
-    builder.set_finish_point("execute_query")
+app = graph.compile()
 
-    return builder.compile()
-
-graph = build_graph()
-
-# -------------------- Streamlit UI ----------------------
-st.set_page_config(page_title="Supervisor SQL Agent", layout="wide")
-st.title("🚦 Supervisor SQL Agent (LangGraph + Streamlit)")
-
-query = st.text_input("Ask a database question:", placeholder="e.g. What is the SOC of all EVs?")
-
-if st.button("Run") and query:
-    with st.spinner("Running agent..."):
-        init_state = {"messages": [
-            {"content": query}
-        ]}
-        final_state = graph.invoke(init_state)
-        st.subheader("🔍 Debug")
-        st.json(final_state)
-
-        last = final_state["messages"][-1]
-        if hasattr(last, "content"):
-            st.markdown(last.content)
-        else:
-            st.info("No final response.")
+# ------------------ Run it ---------------------
+if __name__ == "__main__":
+    import sys
+    user_query = sys.argv[1] if len(sys.argv) > 1 else "List all tables in the database"
+    result = app.invoke({"query": user_query})
+    print("\n📤 Final Answer:\n", result["final_response"])
