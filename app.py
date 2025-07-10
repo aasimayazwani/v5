@@ -93,7 +93,7 @@ def create_tool_node_with_fallback(tools: list) -> RunnableWithFallbacks:
 
 # -------------------- LangGraph State ----------------------
 class SQLAgentState(TypedDict):
-    messages: Annotated[list, lambda m: m]  # Used to thread through all tool messages
+    messages: list  # Used to thread through all tool messages
 
 # -------------------- Graph Construction ----------------------
 def build_graph():
